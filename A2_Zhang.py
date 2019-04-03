@@ -120,6 +120,7 @@ def trainTagger(features, tags):
 
     return bestModel
 
+
 from sklearn import metrics
 from collections import Counter
 
@@ -166,7 +167,6 @@ def getConllTags(filename):
 
 
 
-
 from sys import argv
 
 corpus1 = 'daily547.conll'
@@ -196,6 +196,10 @@ if __name__ == "__main__":
     #2a) load training data: 
     wordToIndex = set()
     nounlist = list()
+    wordCounts = dict()
+    bigramCounts = dict()
+    trigramCounts = dict()
+
     taggedSents = getConllTags(corpus1)+getConllTags(corpus2)
     for sent in taggedSents:
         if sent: 
@@ -208,6 +212,32 @@ if __name__ == "__main__":
             nounlist += list(line.strip())
             line = fp.readline()
     fp.close()
+
+    # iterate through each sentence, and extract word and bigram counts
+    for sent in taggedSents:
+        words = [word.lower() for word, tag in sent]  # grabbing words, droppin gtags
+        # print("\nNext Sent:", words)
+        for i in range(len(words)):
+            try:
+                wordCounts[(words[i],)] += 1
+            except KeyError:
+                wordCounts[(words[i],)] = 1
+
+            # count the bigram
+            if (i > 0):
+                bigram = (words[i - 1], words[i])
+                try:
+                    bigramCounts[bigram] += 1
+                except KeyError:
+                    bigramCounts[bigram] = 1
+
+            # count the trigrams
+            if (i > 1):
+                trigram = (words[i - 2], words[i - 1], words[i])
+                try:
+                    trigramCounts[trigram] += 1
+                except KeyError:
+                    trigramCounts[trigram] = 1
 
     #make dictionaries for converting words to index and tags to ids:
     wordToIndex = {w: i for i, w in enumerate(wordToIndex)} 
