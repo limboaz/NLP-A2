@@ -121,11 +121,11 @@ def trainTagger(features, tags):
     return bestModel
 
 
-def baseModel(bigramCounts, trigramCounts, taggedSents):
-    ngramCounts = trigramCounts
+def baseModel(targetCounts, grams, vocabulary):
+    ngramCounts = targetCounts
     ngramModelProbs = dict()  # stores p(Xi|Xi-1), [x--k...x-1][xi]
     for ngram, count in ngramCounts.items():
-        p = (count + 1) / (bigramCounts[ngram[0:-1]] + len(taggedSents))
+        p = count / grams[ngram[0:-1]]
         try:
             ngramModelProbs[ngram[0:-1]][ngram[-1]] = p  # indexed by [x--k...x-1][xi]
         except KeyError:
@@ -175,35 +175,159 @@ def getConllTags(filename):
     return wordTagsPerSent
 
 
+import tweepy
+import sys
+from time import sleep
+
+
+class StreamListener(tweepy.StreamListener):
+    def __init__(self, api=None):
+        self.tweets = []
+        super().__init__(api)
+
+    def on_status(self, status):
+        tweet = status._json['retweeted_status'] if 'retweeted_status' in status._json.keys() else status._json
+
+        if 'extended_tweet' in tweet.keys():
+            text = tweet['extended_tweet']['full_text']
+        else:
+            text = status.text
+
+        self.tweets.append(text)
+
+    def on_error(self, status):
+        print(status)
+        return False
+
+    def get_tweets(self):
+        return self.tweets
+
+
+def retrieve_tweets(named_entity, total, key, secret):
+    # Get app secrets
+    # secrets = open("secrets.txt")
+    # hard coded the key and secret for the sake of submitting one file
+    consumer_key = "szIHs77Towpo9k3PeGw7UOcql"
+    consumer_secret = "ED1q3SrkX5vGLwi6cY089M5s35CNprrfwY0CDjEs5UDPL3m0dg"
+    # secrets.close()
+
+    # oauth2
+    auth = tweepy.OAuthHandler(consumer_key, consumer_secret)
+    auth.set_access_token(key, secret)
+    api = tweepy.API(auth)
+
+    # Start Stream
+    stream_listener = StreamListener()
+    stream = tweepy.Stream(auth=api.auth, listener=stream_listener, tweet_mode='extended')
+    stream.filter(track=[named_entity], is_async=True)
+
+    while len(stream_listener.get_tweets()) < total:
+        sleep(1)
+
+    stream.disconnect()
+    return stream_listener.get_tweets()
+
+
+def NamedEntityGenerativeSummary(named_entity, twitter_access_token, twitter_access_token_secret):
+    # train the named entity recognizer; save it to an object, train the generic (base) trigram language model; save it
+    recognizer, wordCounts, bigramCounts, trigramCounts, taggedSents, wordToIndex, nounlist = trainRecognizer()
+
+    # pull 1000 tweets that contain named_entity
+    tweets = retrieve_tweets(named_entity, 1000, twitter_access_token, twitter_access_token_secret)
+
+    # Limit to tweets with the named entity being classified as a named entity
+    taggedTweets = []
+    tweetvocabulary = set()
+    for tweet in tweets:
+        tokens = tokenize(tweet)
+        tweetvocabulary |= set(tokens)
+        tweetX = []
+        if len(tokens) == 0:
+            continue
+
+        for i in range(len(tokens)):
+            tweetX.append(getFeaturesForTarget(tokens, i, wordToIndex, nounlist))
+        pred_tags = recognizer.predict(tweetX)
+        tweetWithTags = zip(tokens, pred_tags)
+        taggedTweets += tweetWithTags
+
+        words = tokens
+        for i in range(len(tokens)):
+            try:
+                wordCounts[(words[i],)] += 1
+            except KeyError:
+                wordCounts[(words[i],)] = 1
+
+            # count the bigram
+            if (i > 0):
+                bigram = (words[i - 1], words[i])
+                try:
+                    bigramCounts[bigram] += 1
+                except KeyError:
+                    bigramCounts[bigram] = 1
+
+            # count the trigrams
+            if (i > 1):
+                trigram = (words[i - 2], words[i - 1], words[i])
+                try:
+                    trigramCounts[trigram] += 1
+                except KeyError:
+                    trigramCounts[trigram] = 1
+
+    vocab = tweetvocabulary | wordToIndex.keys()
+    trigram_model = baseModel(trigramCounts, bigramCounts, vocab)
+    bigram_model = baseModel(bigramCounts, wordCounts, vocab)
+
+    # generate five different phrases that follow the named_entity.
+    named_entity_tokens = tokenize(named_entity)
+    phraseCount = 0
+    while phraseCount < 5:
+        last_bigram = named_entity_tokens[-2:]  # last two words of named entity
+        new_word = named_entity_tokens[-1]
+        phrase = named_entity
+        i = 0
+        while i < 5 and new_word != "END":
+            # get probability distribution for next word based on last two words
+            try:
+                choices = trigram_model[tuple(last_bigram)].items()
+            except KeyError:
+                choices = bigram_model[tuple(last_bigram[-1:])].items()
+            # pick a next word from the probability distribution
+            words = []
+            probabilities = []
+            for word, prob in choices:
+                words.append(word)
+                probabilities.append(prob)
+
+            try:
+                new_word = np.random.choice(a=words, p=probabilities)
+            except:
+                new_word = np.random.choice(a=words)
+            # update last_bigram = (last_bigram[1], new_word)
+            last_bigram = (last_bigram[-1], new_word)
+            phrase += " " + new_word
+            i += 1
+        print(phrase)
+        phraseCount += 1
+
+
+
+
 from sys import argv
 
-corpus1 = 'daily547.conll'
-corpus2 = 'oct27.conll'
-nouns = 'cap.1000'
-sampleSentences = \
-    ['The horse raced past the barn fell.',
-     'For 4 years, we attended S.B.U. in the CS program.',
-     'Did you hear Sam tell me to "chill out" yesterday? #rude',
-     'He told Barak Obama to read Newsday to learn about Stony Brook University']
 
-if __name__ == "__main__":
+def trainRecognizer():
+    corpus1 = 'daily547.conll'
+    corpus2 = 'oct27.conll'
+    nouns = 'cap.1000'
+    sampleSentences = \
+        ['The horse raced past the barn fell.',
+         'For 4 years, we attended S.B.U. in the CS program.',
+         'Did you hear Sam tell me to "chill out" yesterday? #rude',
+         'He told Barak Obama to read Newsday to learn about Stony Brook University']
 
-    if len(argv) > 1:  # replace with argument for filename if available
-        try:
-            get_ipython()
-        except:  # not in python notebook; use argv
-            corpus = argv[1]
-
-    ###########################################
-    # 1) Test The Tokenizer
-    for sent in sampleSentences:
-        print(sent, "\n", tokenize(sent), "\n")
-
-    ###########################################
-    # 2) Run Feature Extraction:
-    # 2a) load training data:
-    wordToIndex = set()
     nounlist = list()
+    counts = dict()
     wordCounts = dict()
     bigramCounts = dict()
     trigramCounts = dict()
@@ -212,12 +336,17 @@ if __name__ == "__main__":
     for sent in taggedSents:
         if sent:
             words, tags = zip(*sent)
-            wordToIndex |= set(words)  # union of the words into the set
+            for word in words:
+                try:
+                    counts[word] += 1
+                except KeyError:
+                    counts[word] = 1
+    wordToIndex = [word for word in counts.keys() if counts[word] > 1]
     print("[Read ", len(taggedSents), " Sentences]")
     with open(nouns) as fp:
         line = fp.readline()
         while line:
-            nounlist += list(line.strip())
+            nounlist += line.strip()
             line = fp.readline()
     fp.close()
 
@@ -267,20 +396,27 @@ if __name__ == "__main__":
     # 3 Train the model.
     print("[Training the model]")
     tagger = trainTagger(X, y)
-    print("[done]")
+    testAndPrintAcurracies(tagger, X, y)
+    return tagger, wordCounts, bigramCounts, trigramCounts, taggedSents, wordToIndex, nounlist
 
     ###################################################
     # 4 Test the tagger.
-    testAndPrintAcurracies(tagger, X, y)
+
 
     ###################################################
     # 5 Apply to example sentences:
-    print("\n[Applying to sample sentences]")
-    for sent in sampleSentences:
-        tokens = tokenize(sent)
-        sentX = []
-        for i in range(len(tokens)):
-            sentX.append(getFeaturesForTarget(tokens, i, wordToIndex, nounlist))
-        pred_tags = tagger.predict(sentX)
-        sentWithTags = zip(tokens, pred_tags)
-        print(sent, "\n  predicted tags: ", list(sentWithTags))
+    # print("\n[Applying to sample sentences]")
+    # for sent in sampleSentences:
+    #     tokens = tokenize(sent)
+    #     sentX = []
+    #     for i in range(len(tokens)):
+    #         sentX.append(getFeaturesForTarget(tokens, i, wordToIndex, nounlist))
+    #     pred_tags = tagger.predict(sentX)
+    #     sentWithTags = zip(tokens, pred_tags)
+    #     print(sent, "\n  predicted tags: ", list(sentWithTags))
+
+# these are my own tokens for the sake of submitting one file
+token = "4200770712-lOSJRmsCZZSBX2OWFDRIc5RzSKzut4PyIsdsYDR"
+secret = "4eRO6pUhaz5dZpQSRTtE1fNiIRGOvQHSaIU3k4qN5h5wD"
+
+NamedEntityGenerativeSummary('Trump', token, secret)
